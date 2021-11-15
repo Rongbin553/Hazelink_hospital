@@ -1,0 +1,177 @@
+---
+title: "Hazelink hospitalization linkage cohort survival analysis"
+author: "Rongbin Xu"
+date: "5 August 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Introduction
+
+This document aims to explain the analysis code for the paper "Xu R, Gao CX, Dimitriadis C, et al.Long-term impacts of coal mine fire emitted PM2.5 on hospitalisation: a longitudinal analyses of the Hazelwood Health Study. International Journal of Epidemiology 2021." 
+
+The dataset used here is a simulated dataset with some similarities to the actual data used in the paper. To acess the actual dataset, please contact the principal investigators of the Hazelwood Health Study, Professor Michael Abramson (Michael.Abramson@monash.edu) and Dr Matthew Carroll (Matthew.Carroll@monash.edu). If you have any questions or comments about the code and the paper, feel free to contact Dr Rongbin Xu (rongbin.xu@monash.edu or xuronbin@163.com).
+
+```{r}
+## load required R packages
+library(dplyr)
+library(survival)
+```
+
+## 2. Data preparation
+To prepare the data for survival analysis, we need at least two datasets. 
+
+The first one is individual level data, with each row representing one individual. This dataset contains variables measuring personal characteristics, such as age, sex, exposure level. 
+
+The second one is data of outcome event, with each row representing one event record. The ourcome event is hospital admission in our paper, but could also be other events (e.g., emergency department visit, ambulance call) that can occure repeately. This dataset should include at least the date and individual ID of each event. It can also include the diagnosis or type of the event, such as the ICD-10 code for primary reason of hospital admission.
+
+### 2.1 Individual level data
+```{r}
+indi_data<-read.csv("simulated_individual_data.csv")%>%
+  mutate(censored_date=as.Date(censored_date))
+str(indi_data)
+head(indi_data)
+
+## person_ID: unique id of each participant;
+## censored_date: the censoring date when the follow-up was ended(defined as "2019-03-01") or the date when the participant died, see the supplementary materials of our paper(Xu et al.IJE 2021) for details
+## fire_PM: average fire related PM2.5 concentration during the 6-week Hazelwood fire event(not actual data)
+## Gender
+## Age: age at the Hazelwood adult survey
+## weight: the survey weight for the Hazelwood adult surve. This variable was made to make the survey more repsentative of local population.
+
+
+```
+### 2.2 Outcome event data
+```{r}
+event_data<-read.csv("simulated_outcome_event_data.csv")%>%
+  mutate(date=as.Date(date))
+
+str(event_data)
+head(event_data)
+summary(event_data)
+## hos_id: unique id of each hospital admission record
+## person_ID: unique id of each participant; some participants' id did not exsist in this event dataset, meaning they did not have any hospital admission during the follpw-up peroid
+## date: date of hospital admission
+## icd_10: ICD-10 code of the primary condition that leads to the hospital admission
+## diagnosis: the primary diagnosis defined by the ICD-10 code
+
+
+```
+
+
+
+### 2.3 Clean data for survival analysis, all-cause hospitalization
+```{r}
+start_date<-as.Date("2014-03-31")## the start date of the follow-up
+
+## a base data indicates that each person have at least two important dates: the start and the end date of the follow-up
+base<-data.frame(person_ID=indi_data$person_ID,date=start_date)
+base<-indi_data%>%
+  select(person_ID,censored_date)%>%
+  rename(date=censored_date)%>%
+  bind_rows(base)%>%
+  arrange(person_ID,date)
+
+
+## I used 2014-03-31 rather than 2014-04-01 as the start date, because there were some cases happened on 2014-04-1,using 2014-03-31 would make sure that the t_stop>t_start, which is required by the model runing
+
+all_cause_survival<-event_data%>%
+  select(person_ID,date)%>%
+  bind_rows(base)%>%
+  arrange(person_ID,date)%>%
+  left_join(indi_data[,c("person_ID","censored_date")])%>%
+  group_by(person_ID)%>%
+  mutate(t_start=lag(date)+1,
+         t_stop=date)%>%
+  filter(!is.na(t_start))%>%##remove the NAs due to lag
+  mutate(status=ifelse(t_stop==censored_date,0,1))%>%
+  mutate(event=1:length(person_ID))%>%
+  mutate(t_start=ifelse(as.numeric(t_start-start_date)==1,0,as.numeric(t_start-start_date)),## the first event should start from 0
+         t_stop=as.numeric(t_stop-start_date))%>%
+  mutate(case.no.since.fire=event-1)%>%
+  ungroup()
+
+str(all_cause_survival)
+head(all_cause_survival)
+
+## event: the event sequence happended since the start_date. A event could be either a censoring(status=0) or a hospital admission(status=1)
+## t_start: the day when the event could happen(the start of follow-up or one day after last event)
+## t_stop: the day when the event actually happened
+## case.no.since.fire: running total number of events since mine fire and before the event of interest, for the supplementary material of our paper for details
+```
+
+### 2.4 Clean data for survival analysis, for cardiovascular hospitalization
+Following the same procedures to clean data for other cause-specific outcomes
+```{r}
+CVD_survival<-event_data%>%
+  filter(diagnosis=="CVD")%>% ## only selected respiratory hospital admissions
+  select(person_ID,date)%>%
+  bind_rows(base)%>%
+  arrange(person_ID,date)%>%
+  left_join(indi_data[,c("person_ID","censored_date")])%>%
+  group_by(person_ID)%>%
+  mutate(t_start=lag(date)+1,
+         t_stop=date)%>%
+  filter(!is.na(t_start))%>%##remove the NAs due to lag
+  mutate(status=ifelse(t_stop==censored_date,0,1))%>%
+  mutate(event=1:length(person_ID))%>%
+  mutate(t_start=ifelse(as.numeric(t_start-start_date)==1,0,as.numeric(t_start-start_date)),
+         t_stop=as.numeric(t_stop-start_date))%>%
+  mutate(case.no.since.fire=event-1)%>%
+  ungroup()
+
+str(CVD_survival)
+head(CVD_survival)
+```
+
+## 3. Run PWP-CP model
+```{r}
+## prepare data
+reg_data<-all_cause_survival%>%
+  left_join(indi_data)
+reg_data_CVD<-CVD_survival%>%left_join(indi_data)## this can used for CVD-specific analyses
+
+
+## run model
+model_PWP<-coxph(Surv(t_start,t_stop,status) ~ fire_PM+cluster(person_ID)+strata(event)+Age+Gender,
+         method="breslow",data =reg_data,weights = weight)
+summary(model_PWP)$coefficients
+
+
+
+
+## extract coefficients and hzazard ratios for fire PM
+data.frame(Beta=summary(model_PWP)$coefficients[1,1],
+           Se=summary(model_PWP)$coefficients[1,4],
+           P_value=summary(model_PWP)$coefficients[1,6])%>%
+  mutate(HR=exp(10*Beta),
+         HR_low=exp(10*(Beta-1.96*Se)),
+         HR_up=exp(10*(Beta+1.96*Se)))## HR, HR_low, HR_up repsented the HR(95%CI) for each 10ug/m3 increase in fire-related PM2.5
+    
+```
+## 4. Run a slighly modified AG model
+See supplementary materials of Xu et al.IJE 2021 about how we modified the AG model
+```{r}
+
+model_AG<-coxph(Surv(t_start,t_stop,status) ~ fire_PM+cluster(person_ID)+case.no.since.fire+Age+Gender,
+         method="breslow",data =reg_data,weights = weight)
+summary(model_AG)$coefficients
+
+
+## extract coefficients and hzazard ratios for fire PM
+data.frame(Beta=summary(model_AG)$coefficients[1,1],
+           Se=summary(model_AG)$coefficients[1,4],
+           P_value=summary(model_AG)$coefficients[1,6])%>%
+  mutate(HR=exp(10*Beta),
+         HR_low=exp(10*(Beta-1.96*Se)),
+         HR_up=exp(10*(Beta+1.96*Se)))## HR, HR_low, HR_up repsented the HR(95%CI) for each 10ug/m3 increase in fire-related PM2.5
+
+
+```
+```{r}
+sessionInfo()
+```
+
